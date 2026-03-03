@@ -1,9 +1,11 @@
 import io
 import logging
+import re
 import time
 from functools import wraps
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction, ParseMode
 
@@ -29,8 +31,38 @@ from database.repository import Repository
 
 logger = logging.getLogger(__name__)
 
+_MARKDOWN_SPECIAL = re.compile(r"(?<!\\)([_*`\[\]])")
+
 _user_last_analysis: dict[int, float] = {}
 RATE_LIMIT_SECONDS = 60
+
+
+def _escape_markdown(text: str) -> str:
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", text)
+
+
+async def _safe_reply_text(message, text: str, **kwargs):
+    """Send with Markdown, falling back to plain text on parse failure."""
+    try:
+        return await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except BadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            logger.warning("Markdown parse failed, retrying as plain text")
+            clean = text.replace("*", "").replace("_", "").replace("`", "")
+            return await message.reply_text(clean, **kwargs)
+        raise
+
+
+async def _safe_edit_text(message, text: str, **kwargs):
+    """Edit with Markdown, falling back to plain text on parse failure."""
+    try:
+        return await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except BadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            logger.warning("Markdown parse failed on edit, retrying as plain text")
+            clean = text.replace("*", "").replace("_", "").replace("`", "")
+            return await message.edit_text(clean, **kwargs)
+        raise
 
 
 def _rate_limited(func):
@@ -110,7 +142,7 @@ async def tips_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     advice = await advisor.get_recommendations(score_report, history)
-    await update.message.reply_text(advice, parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(update.message, advice)
 
 
 async def streak_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,7 +164,7 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(f"```\n{comparison}\n```", parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(update.message, f"```\n{comparison}\n```")
 
 
 @_rate_limited
@@ -174,7 +206,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Message 1: Item list
     item_list_text = format_item_list(parsed_data, score_report)
-    await update.message.reply_text(item_list_text, parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(update.message, item_list_text)
 
     # Message 2: Score card image
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
@@ -194,7 +226,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for r in previous_receipts
     ]
     advice = await advisor.get_recommendations(score_report, history)
-    await update.message.reply_text(advice, parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(update.message, advice)
 
     # Message 4: Predictive insight (if history exists)
     engine = PredictiveEngine(repo)
@@ -202,8 +234,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if trends["total_receipts"] > 1:
         weekly = engine.generate_weekly_report(user.id)
         if weekly:
-            await update.message.reply_text(
-                weekly, parse_mode=ParseMode.MARKDOWN,
+            await _safe_reply_text(
+                update.message, weekly,
                 reply_markup=after_analysis_keyboard(),
             )
 
@@ -260,7 +292,7 @@ async def _cb_tips(query, context):
         for r in receipts
     ]
     advice = await advisor.get_recommendations(score_report, history)
-    await query.message.reply_text(advice, parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(query.message, advice)
 
 
 async def _cb_streak(query, context):
@@ -278,4 +310,4 @@ async def _cb_compare(query, context):
     if not comparison:
         await query.message.reply_text("📭 Need at least two receipts to compare.")
         return
-    await query.message.reply_text(f"```\n{comparison}\n```", parse_mode=ParseMode.MARKDOWN)
+    await _safe_reply_text(query.message, f"```\n{comparison}\n```")
