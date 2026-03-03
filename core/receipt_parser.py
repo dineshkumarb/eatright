@@ -62,21 +62,18 @@ class ReceiptParser:
                 ],
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
-                    max_output_tokens=4096,
+                    max_output_tokens=30000,
                     temperature=0.1,
+                    response_mime_type="application/json",
                 ),
             )
 
             response_text = response.text.strip()
-            if response_text.startswith("```"):
-                response_text = response_text.split("\n", 1)[1]
-                if response_text.endswith("```"):
-                    response_text = response_text[:-3]
-
             return json.loads(response_text)
 
         except json.JSONDecodeError as e:
             logger.error("Failed to parse Gemini response as JSON: %s", e)
+            logger.debug("Raw response: %s", response.text[:500])
             raise ValueError(
                 "Could not parse the receipt. Please try again with a clearer photo."
             ) from e
